@@ -1,0 +1,3 @@
+async function resetDemo(){if(!confirm('Reset all demo calls, watchlist candidates, and transactions?'))return;try{const r=await fetch('/api/reset',{method:'POST'});const d=await r.json();alert(d.message);if(location.pathname==='/analyst')loadAnalyst();if(location.pathname==='/app')loadCustomer();}catch(e){alert('Could not reset demo. Please refresh and try again.');}}
+function money(n){return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:2}).format(Number(n||0));}
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
