@@ -64,10 +64,12 @@ def decoy_message(body:MessageIn):
     transcript.append({'speaker':'Caller','text':body.text})
     prompt='''You are Dorothy Miller, 68, a retired school teacher in Ohio. You have an IRA and a brokerage account with a large balance. You are polite, a bit anxious, slightly hard of hearing, and slow with technology. Goal: keep the caller talking as long as possible and get them to state exactly what they want you to do, especially the bank name, routing number, account number, amount, and phone numbers. Ask clarifying questions, ask them to repeat numbers slowly, say you're writing things down, mention looking for your glasses. Ask 'Can I call you back on the main number on my statement?' at some point. Never reveal you are an AI. Never give real personal data; if asked, give only these decoy details: account ending 4417, email dorothy.miller.decoy1@example.com, date of birth 03/14/1958. Never actually agree to complete a transfer; stall instead. Keep replies under 40 words.\n'''
     prior='\n'.join(f"{m['speaker']}: {m['text']}" for m in transcript[-10:])
-    raw=gemini_text(prompt+'Respond to the latest caller message as Dorothy. Transcript:\n'+prior+'\nDorothy:')
+    raw=gemini_text('Conversation so far:\n'+prior+"\n\nReply as Dorothy to the caller's latest message. Only Dorothy's words, no name label.",
+                    system=prompt, max_tokens=300)
     reply=(raw or '').strip().strip('"')
     if reply.lower().startswith('dorothy:'): reply=reply[8:].strip()
-    if not reply or len(reply.split())>45:
+    if reply and len(reply.split())>45: reply=' '.join(reply.split()[:45])  # shorten, don't throw away
+    if not reply:
         # Offline mode (or Gemini unavailable): rule-based Dorothy that follows the conversation.
         reply=offline_dorothy.reply(transcript)
     transcript.append({'speaker':'Dorothy','text':reply})
