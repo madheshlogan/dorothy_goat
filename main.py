@@ -10,6 +10,7 @@ import db
 from extractor import extract, SAMPLE
 from llm import gemini_text
 from fraud_engine import evaluate
+import offline_dorothy
 
 BASE=Path(__file__).parent
 app=FastAPI(title="Decoy Customer – Demo")
@@ -50,9 +51,10 @@ def page(page:str, request:Request):
 @app.post('/api/decoy/start')
 def start_call():
     call_id=str(uuid.uuid4())
-    db.create_call(call_id, [])
+    greeting={'speaker':'Dorothy','text':offline_dorothy.OPENING_LINE}
+    db.create_call(call_id, [greeting])
     db.log_event('call_started', f'Decoy call {call_id} started')
-    return {'call_id':call_id,'message':'Call started. Speak or type a message.'}
+    return {'call_id':call_id,'greeting':greeting['text'],'transcript':[greeting],'message':'Call started. Speak or type as the caller.'}
 
 @app.post('/api/decoy/message')
 def decoy_message(body:MessageIn):
@@ -64,7 +66,10 @@ def decoy_message(body:MessageIn):
     prior='\n'.join(f"{m['speaker']}: {m['text']}" for m in transcript[-10:])
     raw=gemini_text(prompt+'Respond to the latest caller message as Dorothy. Transcript:\n'+prior+'\nDorothy:')
     reply=(raw or '').strip().strip('"')
-    if not reply or len(reply.split())>45: reply=CANNED[(len(transcript)-1)%len(CANNED)]
+    if reply.lower().startswith('dorothy:'): reply=reply[8:].strip()
+    if not reply or len(reply.split())>45:
+        # Offline mode (or Gemini unavailable): rule-based Dorothy that follows the conversation.
+        reply=offline_dorothy.reply(transcript)
     transcript.append({'speaker':'Dorothy','text':reply})
     db.save_transcript(body.call_id,transcript,ended=False)
     return {'reply':reply,'transcript':transcript}

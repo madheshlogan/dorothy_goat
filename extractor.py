@@ -31,8 +31,15 @@ class Extraction(BaseModel):
 
 SAMPLE = """David: Hello Dorothy, this is David from the fraud department. Your account is compromised. You must act today. Move $48,000 to First Coastal Bank, routing 021000089, account 5532198804. Call me at 202-555-0147. Don't tell anyone, not even family. I can keep your money safe."""
 
+def _caller_text(transcript):
+    if not isinstance(transcript, list):
+        return str(transcript)
+    return ' '.join(str(m.get('text','')) for m in transcript if m.get('speaker') != 'Dorothy')
+
 def offline_extract(transcript):
-    text = ' '.join(str(m.get('text','')) for m in transcript) if isinstance(transcript, list) else str(transcript)
+    # Only the caller's words: Dorothy repeats numbers back and gives her own decoy details,
+    # which must not be counted as scammer data or as 'caller used leaked data'.
+    text = _caller_text(transcript)
     low = text.lower(); flags=[]
     tests = {
       'impersonates_fidelity_or_bank': r'fraud department|bank|fidelity|security team',
@@ -54,8 +61,8 @@ def offline_extract(transcript):
     if routing or accounts:
         banks = re.findall(r'(?:to|at)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3}\s+Bank)', text)
         entities.append({'type':'bank_account','bank_name':banks[0] if banks else 'Unknown bank','routing_number':routing[0] if routing else '', 'account_number':accounts[0] if accounts else ''})
-    entities += [{'type':'phone_number','value':p} for p in phones]
-    entities += [{'type':'amount','value':float(a.replace(',',''))} for a in amounts]
+    entities += [{'type':'phone_number','value':p} for p in dict.fromkeys(phones)]
+    entities += [{'type':'amount','value':float(a.replace(',',''))} for a in dict.fromkeys(amounts)]
     leaked = '4417' in text or 'dorothy.miller.decoy1@example.com' in low
     scam = bool(flags) or bool(routing and accounts)
     risk = min(100, (35 if scam else 5) + 10*len(flags) + (30 if leaked else 0))
@@ -63,8 +70,7 @@ def offline_extract(transcript):
     for phrase in ['Your account is compromised','You must act today',"Don't tell anyone, not even family",'move your money to a safe account','act immediately']:
         if phrase.lower() in low: lines.append(phrase)
     if not lines and scam: lines = [x.strip()[:100] for x in re.findall(r'[^.!?]+[.!?]?', text) if re.search(r'urgent|must|secret|safe|compromis|transfer|money|account', x, re.I)][:5]
-    if leaked: risk=min(100,risk+30)
-    return {'is_scam':scam,'scam_type':'bank_impersonation' if scam and ('bank' in low or 'fraud department' in low) else ('other' if scam else 'not_scam'), 'risk_score':risk, 'red_flags':flags, 'entities':entities, 'script_lines':lines[:5], 'summary': 'Caller used pressure or suspicious payment instructions.' if scam else 'No clear scam indicators were detected.'}
+    return {'is_scam':scam,'scam_type':'bank_impersonation' if scam and ('bank' in low or 'fraud department' in low) else ('other' if scam else 'not_scam'), 'risk_score':risk, 'red_flags':flags, 'entities':entities, 'script_lines':lines[:5], 'summary': ('Caller used pressure or suspicious payment instructions.' if scam else 'No clear scam indicators were detected.') + (' Uses leaked decoy data.' if leaked else '')}
 
 def extract(transcript):
     text = '\n'.join(f"{m.get('speaker','Caller')}: {m.get('text','')}" for m in transcript)
@@ -80,13 +86,13 @@ def extract(transcript):
             try: result = Extraction.model_validate(parsed).model_dump() if parsed is not None else None
             except ValidationError: result = None
         if result:
-            low=text.lower()
+            low=_caller_text(transcript).lower()
             if '4417' in low or 'dorothy.miller.decoy1@example.com' in low:
                 result['risk_score']=min(100,result['risk_score']+30)
                 result['summary'] = result['summary'].rstrip('.') + '; uses leaked decoy data.'
             return result
     result = offline_extract(transcript)
-    low=text.lower()
-    if ('4417' in low or 'dorothy.miller.decoy1@example.com' in low) and 'uses leaked decoy data' not in result['summary']:
+    low=_caller_text(transcript).lower()
+    if ('4417' in low or 'dorothy.miller.decoy1@example.com' in low) and 'uses leaked decoy data' not in result['summary'].lower():
         result['risk_score']=min(100,result['risk_score']+30); result['summary'] += ' Uses leaked decoy data.'
     return result
