@@ -1,8 +1,8 @@
 """Decoy Customer: fake-data-only ideathon prototype."""
-import json, uuid, random
+import io, json, re, uuid, random
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -12,6 +12,7 @@ from llm import gemini_text
 from fraud_engine import evaluate
 import offline_dorothy
 import personas
+import report
 
 BASE=Path(__file__).parent
 app=FastAPI(title="Decoy Customer – Demo")
@@ -148,6 +149,15 @@ def analyst_data():
       try: latest_scripts=json.loads(latest[0]['extraction_json']).get('script_lines',[])
       except Exception: pass
     return {'candidates':candidates,'calls':[{'id':c['id'],'transcript':json.loads(c['transcript_json']),'extraction':json.loads(c['extraction_json']) if c.get('extraction_json') else None} for c in calls], 'stats':stats,'latest_scripts':latest_scripts}
+
+@app.get('/api/analyst/report/{call_id}')
+def analyst_report(call_id:str):
+    call=db.one('SELECT * FROM calls WHERE id=?',(call_id,))
+    if not call: raise HTTPException(404,'Call not found')
+    content,media_type,ext=report.build_report(call)
+    short=re.sub(r'[^A-Za-z0-9_-]','',call_id[:8])
+    return StreamingResponse(io.BytesIO(content),media_type=media_type,
+        headers={'Content-Disposition':f'attachment; filename="dorothy_report_{short}.{ext}"','Content-Length':str(len(content))})
 
 @app.post('/api/watchlist/{item_id}/{action}')
 def review(item_id:int, action:str):

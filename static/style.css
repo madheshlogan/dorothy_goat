@@ -12,3 +12,4 @@
 .persona-card:disabled{opacity:.6;cursor:not-allowed}
 .persona-card.selected:disabled{opacity:1}
 
+.call-list summary .text-button{margin-left:8px}
