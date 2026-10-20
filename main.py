@@ -12,6 +12,7 @@ from llm import gemini_text
 from fraud_engine import evaluate
 import offline_dorothy
 import personas
+import network
 import report
 
 BASE=Path(__file__).parent
@@ -165,6 +166,10 @@ def analyst_data():
       try: latest_scripts=json.loads(latest[0]['extraction_json']).get('script_lines',[])
       except Exception: pass
     return {'candidates':candidates,'calls':[{'id':c['id'],'started_at':c['started_at'],'ended_at':c['ended_at'],'persona_id':c.get('persona_id'),'transcript':json.loads(c['transcript_json']),'extraction':json.loads(c['extraction_json']) if c.get('extraction_json') else None} for c in calls], 'stats':stats,'latest_scripts':latest_scripts}
+
+@app.get('/api/analyst/network')
+def analyst_network():
+    return network.build_network()
 
 @app.get('/api/analyst/report/{call_id}')
 def analyst_report(call_id:str):

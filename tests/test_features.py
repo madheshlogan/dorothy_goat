@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import db
+import network
 import offline_dorothy as od
 import report
 from extractor import apply_repeat_caller, extract
@@ -37,6 +38,50 @@ def acct(routing='021000089', account='5532198804', bank=BANK):
 
 def phone(v=PHONE):
     return {'type': 'phone_number', 'value': v}
+
+
+# ============ Feature 1: network ============
+
+def test_network_empty_and_single_call(client):
+    assert network.build_network() == {'nodes': [], 'edges': []}
+    add_call('a', '2026-01-01T00:00:00+00:00', [acct()])
+    n = client.get('/api/analyst/network').json()
+    assert len(n['nodes']) == 1 and n['edges'] == []
+
+
+def test_isolated_node_still_appears(client):
+    add_call('a', '2026-01-01T00:00:00+00:00', [acct()])
+    add_call('b', '2026-01-02T00:00:00+00:00', [acct('111000614', '3029981746')])
+    n = client.get('/api/analyst/network').json()
+    assert {x['id'] for x in n['nodes']} == {'a', 'b'} and n['edges'] == []
+
+
+def test_edges_for_shared_routing_account_and_phone(client):
+    add_call('a', '2026-01-01T00:00:00+00:00', [acct(), phone('202-555-0147')])
+    add_call('b', '2026-01-02T00:00:00+00:00', [acct(account='999999999'), phone('(202) 555-0147')])  # routing + phone (different format)
+    add_call('c', '2026-01-03T00:00:00+00:00', [acct(routing='111111111', account='5532198804')])      # account only, with a
+    n = client.get('/api/analyst/network').json()
+    kinds = {(e['from'], e['to'], e['shared_entity_type']) for e in n['edges']}
+    assert kinds == {('a', 'b', 'routing'), ('a', 'b', 'phone'), ('a', 'c', 'account')}
+    assert all(e['label'] for e in n['edges'])
+
+
+def test_node_fields_and_colour_thresholds(client):
+    for i, risk in enumerate([0, 39, 40, 70, 71, 100]):
+        add_call(f'c{i}', f'2026-01-0{i + 1}T00:00:00+00:00', [], risk=risk, summary=f'sum{risk}')
+    nodes = {n['id']: n for n in client.get('/api/analyst/network').json()['nodes']}
+    assert [nodes[f'c{i}']['color'] for i in range(6)] == [network.GREEN, network.GREEN, network.ORANGE, network.ORANGE, network.RED, network.RED]
+    n = nodes['c3']
+    assert n['call_id'] == 'c3' and n['risk_score'] == 70 and n['summary'] == 'sum70'
+    assert n['label'].startswith('2026-01-04') and 'bank_impersonation' in n['label']
+
+
+def test_calls_without_extraction_are_not_nodes_and_bad_json_is_skipped(client):
+    db.create_call('plain', [])
+    db.create_call('bad', [])
+    with db.connect() as c:
+        c.execute("UPDATE calls SET extraction_json='{not json' WHERE id='bad'")
+    assert client.get('/api/analyst/network').json()['nodes'] == []
 
 
 # ============ Feature 2: report ============
