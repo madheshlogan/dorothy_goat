@@ -1,6 +1,7 @@
 """SQLite persistence and seed data for the fake-data-only demo."""
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,7 +23,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS calls(
           id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT,
           transcript_json TEXT NOT NULL DEFAULT '[]', extraction_json TEXT,
-          persona_id TEXT NOT NULL DEFAULT 'dorothy'
+          persona_id TEXT NOT NULL DEFAULT 'dorothy', prior_context TEXT
         );
         CREATE TABLE IF NOT EXISTS watchlist(
           id INTEGER PRIMARY KEY AUTOINCREMENT, item_type TEXT NOT NULL, value TEXT NOT NULL,
@@ -57,6 +58,8 @@ def migrate(c):
     cols = {r[1] for r in c.execute("PRAGMA table_info(calls)").fetchall()}
     if 'persona_id' not in cols:
         c.execute("ALTER TABLE calls ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'dorothy'")
+    if 'prior_context' not in cols:  # JSON about earlier calls from the same phone number (same-scammer memory)
+        c.execute("ALTER TABLE calls ADD COLUMN prior_context TEXT")
 
 def seed_customer(c=None):
     own = c is None
@@ -118,3 +121,75 @@ def one(query, params=()):
         r = c.execute(query, params).fetchone()
         return dict(r) if r else None
 
+
+# ---------------------------------------------------------------------------
+# Same-scammer memory: find earlier calls that involved the same phone number.
+# Phone numbers are only known after extraction, so we search the extracted entities.
+# ---------------------------------------------------------------------------
+def digits(value):
+    return re.sub(r"\D", "", str(value or ""))
+
+def normalize_phone(value):
+    """Digits only, without a leading US country code, so '(202) 555-0147' == '+1 202.555.0147'."""
+    d = digits(value)
+    return d[1:] if len(d) == 11 and d.startswith("1") else d
+
+def call_entities(extraction_json):
+    """Entities list from a stored extraction (empty if missing or malformed)."""
+    try:
+        return (json.loads(extraction_json or "{}") or {}).get("entities", []) or []
+    except (ValueError, TypeError, AttributeError):
+        return []
+
+def get_calls_by_phone(phone_number, exclude_call_id=None):
+    """Earlier calls (oldest first) whose extracted entities contain this phone number."""
+    wanted = normalize_phone(phone_number)
+    if not wanted:
+        return []
+    found = []
+    for c in rows("SELECT id,started_at,ended_at,extraction_json FROM calls WHERE extraction_json IS NOT NULL ORDER BY started_at ASC, rowid ASC"):
+        if c["id"] == exclude_call_id:
+            continue
+        ents = call_entities(c["extraction_json"])
+        if any(e.get("type") == "phone_number" and normalize_phone(e.get("value")) == wanted for e in ents):
+            ex = json.loads(c["extraction_json"])
+            found.append({"id": c["id"], "started_at": c["started_at"], "ended_at": c["ended_at"],
+                          "risk_score": ex.get("risk_score"), "scam_type": ex.get("scam_type"), "entities": ents})
+    return found
+
+def get_prior_entities(phone_number, exclude_call_id=None):
+    """Union of the bank names, routing numbers and account numbers seen in earlier calls from this number (oldest first)."""
+    banks, routing, accounts = [], [], []
+    for call in get_calls_by_phone(phone_number, exclude_call_id):
+        for e in call["entities"]:
+            if e.get("type") != "bank_account":
+                continue
+            bank = (e.get("bank_name") or "").strip()
+            if bank and bank != "Unknown bank" and bank not in banks: banks.append(bank)
+            if e.get("routing_number") and e["routing_number"] not in routing: routing.append(e["routing_number"])
+            if e.get("account_number") and e["account_number"] not in accounts: accounts.append(e["account_number"])
+    return {"banks": banks, "routing_numbers": routing, "account_numbers": accounts}
+
+def build_prior_context(phone_number, exclude_call_id=None):
+    """What we remember about this number, or None for a first-time caller / missing number.
+    Shape: {phone, prior_calls, last_call_date, prior_entities: {bank, routing, account}} (most recent values)."""
+    calls = get_calls_by_phone(phone_number, exclude_call_id)
+    if not calls:
+        return None
+    ents = get_prior_entities(phone_number, exclude_call_id)
+    return {"phone": normalize_phone(phone_number), "prior_calls": len(calls),
+            "last_call_date": (calls[-1]["started_at"] or "")[:10],
+            "prior_entities": {"bank": ents["banks"][-1] if ents["banks"] else None,
+                               "routing": ents["routing_numbers"][-1] if ents["routing_numbers"] else None,
+                               "account": ents["account_numbers"][-1] if ents["account_numbers"] else None}}
+
+def save_prior_context(call_id, ctx):
+    with connect() as c:
+        c.execute("UPDATE calls SET prior_context=? WHERE id=?", (json.dumps(ctx) if ctx else None, call_id))
+
+def load_prior_context(call_id):
+    r = one("SELECT prior_context FROM calls WHERE id=?", (call_id,))
+    try:
+        return json.loads(r["prior_context"]) if r and r["prior_context"] else None
+    except ValueError:
+        return None

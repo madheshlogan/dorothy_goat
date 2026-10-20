@@ -5,7 +5,7 @@ from llm import gemini_text, safe_json
 from personas import leaked_decoy_data
 
 SCAM_TYPES = {'bank_impersonation','investment','tech_support','romance','government','other','not_scam'}
-FLAGS = {'impersonates_fidelity_or_bank','urgency','secrecy','move_money_to_safe_account','asks_for_codes_or_passwords','crypto_or_gift_cards','refuses_callback','threats'}
+FLAGS = {'impersonates_fidelity_or_bank','urgency','secrecy','move_money_to_safe_account','asks_for_codes_or_passwords','crypto_or_gift_cards','refuses_callback','threats','repeat_caller'}
 class Entity(BaseModel):
     type: str
     bank_name: str = ''
@@ -80,9 +80,9 @@ def offline_extract(transcript):
     if not lines and scam: lines = [x.strip()[:100] for x in re.findall(r'[^.!?]+[.!?]?', text) if re.search(r'urgent|must|secret|safe|compromis|transfer|money|account', x, re.I)][:5]
     return {'is_scam':scam,'scam_type':_scam_type(low, scam), 'risk_score':risk, 'red_flags':flags, 'entities':entities, 'script_lines':lines[:5], 'summary': ('Caller used pressure or suspicious payment instructions.' if scam else 'No clear scam indicators were detected.') + (' Uses leaked decoy data.' if leaked else '')}
 
-def extract(transcript):
+def _extract(transcript):
     text = '\n'.join(f"{m.get('speaker','Caller')}: {m.get('text','')}" for m in transcript)
-    prompt = f'''Analyze this call transcript for fraud. Return ONLY strict JSON with keys is_scam (boolean), scam_type (one of {sorted(SCAM_TYPES)}), risk_score (integer 0-100), red_flags (only from {sorted(FLAGS)}), entities (array; bank account objects have type, bank_name, routing_number, account_number; phone objects have type, value; amount objects have type, numeric value), script_lines (up to 5 verbatim short pressure phrases), summary (one sentence). Distinguish ordinary sales from scams; selling a product without red flags is not a scam.\nTranscript:\n{text}'''
+    prompt = f'''Analyze this call transcript for fraud. Return ONLY strict JSON with keys is_scam (boolean), scam_type (one of {sorted(SCAM_TYPES)}), risk_score (integer 0-100), red_flags (only from {sorted(FLAGS - {'repeat_caller'})}), entities (array; bank account objects have type, bank_name, routing_number, account_number; phone objects have type, value; amount objects have type, numeric value), script_lines (up to 5 verbatim short pressure phrases), summary (one sentence). Distinguish ordinary sales from scams; selling a product without red flags is not a scam.\nTranscript:\n{text}'''
     raw = gemini_text(prompt)
     parsed = safe_json(raw)
     if parsed is not None:
@@ -102,3 +102,23 @@ def extract(transcript):
     if leaked_decoy_data(_caller_text(transcript)) and 'uses leaked decoy data' not in result['summary'].lower():
         result['risk_score']=min(100,result['risk_score']+30); result['summary'] += ' Uses leaked decoy data.'
     return result
+
+def apply_repeat_caller(result, prior_context):
+    """Same-scammer memory: raise the risk by 20 per earlier call from this number (capped at +40), flag it, note it in the summary.
+    'repeat_caller' is decided here from our own records, never by the LLM, so it is always cleared first."""
+    result['red_flags'] = [f for f in result.get('red_flags', []) if f != 'repeat_caller']
+    try:
+        prior_calls = int((prior_context or {}).get('prior_calls') or 0)
+    except (TypeError, ValueError):
+        prior_calls = 0
+    if prior_calls <= 0:
+        return result
+    result['risk_score'] = min(100, result['risk_score'] + min(20 * prior_calls, 40))
+    result['red_flags'].append('repeat_caller')
+    when = (prior_context.get('last_call_date') or 'an earlier date')
+    result['summary'] = result['summary'].rstrip() + f" Repeat caller — previously contacted on {when}."
+    return result
+
+def extract(transcript, prior_context=None):
+    """Extract scam intelligence. prior_context (from db.build_prior_context) marks a returning caller."""
+    return apply_repeat_caller(_extract(transcript), prior_context)

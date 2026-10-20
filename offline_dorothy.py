@@ -306,6 +306,14 @@ LINES = {
     "ok": "Alright.",
     # Every persona's callback line must contain "call you back": that is how we know it was already asked.
     "callback": "Before I do anything, can I call you back on the number on my statement?",
+    # Same-scammer memory (only used when prior_context says this phone number called before).
+    "recall": "Weren't you the one who called about {bank} before? Your voice sounds so familiar, dear.",
+    "recall_nobank": "You sound familiar, dear. Haven't you called me before?",
+    "confirm_bank": "Was that the same {bank} you mentioned before?",
+    "confirm_routing": "Routing number {digits}. Is that the same one you gave me before?",
+    "confirm_account": "Account {digits}. Was that the same account as last time?",
+    "familiar_stalls": ["You sound familiar, dear... have we spoken before?",
+                        "I could swear I've heard your voice before. Hold on, I'm finding my glasses."],
 }
 
 DOROTHY_VOICE = {"RESPONSES": RESPONSES, "LEADS": LEADS, "ASK_FOR": ASK_FOR, "STALLS": STALLS,
@@ -423,6 +431,13 @@ ROBERT_VOICE = {
         "name_known": " Your name was {name}, right? And what's your case ID?",
         "name_unknown": " What's your name and employee ID?",
         "ok": "Okay.",
+        "recall": "Weren't you the one who called about {bank} before? Do you have a reference from that earlier case?",
+        "recall_nobank": "Your voice sounds familiar. Haven't we spoken before? What was that earlier case number?",
+        "confirm_bank": "Was that the same {bank} you mentioned before? Let me check my notes.",
+        "confirm_routing": "Routing number {digits}. Same one as in the earlier ticket?",
+        "confirm_account": "Account {digits}. Is that the same account as last time?",
+        "familiar_stalls": ["That voice sounds familiar. Did we speak before about a different case ID?",
+                            "Hold on, I think I logged a call like this before. Let me check my system."],
         "callback": "Before I do anything, can I call you back on a number I can verify independently?",
     },
 }
@@ -540,6 +555,13 @@ SANDRA_VOICE = {
         "name_unknown": " What did you say your name was? And the company?",
         "ok": "Alright.",
         "callback": "Before I do anything, can I call you back on an official number my accountant can verify?",
+        "recall": "Weren't you the one who called about {bank} before? My accountant said it was nothing.",
+        "recall_nobank": "You sound familiar. Have you called the shop before?",
+        "confirm_bank": "Was that the same {bank} you mentioned before? I wrote it on the order pad.",
+        "confirm_routing": "Routing number {digits}. Same as last time?",
+        "confirm_account": "Account {digits}. Is that the same account as before?",
+        "familiar_stalls": ["I feel like we've talked before. Did you call the shop last week?",
+                            "Hold on, I think my accountant mentioned a call like this."],
     },
 }
 
@@ -572,8 +594,27 @@ def _context(p):
     }
 
 
-def _stalls(slots, v):
-    return v["METHOD_STALLS"] if slots.get("method") in ("gift cards", "bitcoin") else v["STALLS"]
+def _stalls(slots, v, prior=None):
+    if slots.get("method") in ("gift cards", "bitcoin"):
+        return v["METHOD_STALLS"]
+    # A returning caller sometimes gets a line hinting that we recognise them.
+    return v["STALLS"] + (v["LINES"]["familiar_stalls"] if prior else [])
+
+
+def _repeat_prior(prior_context):
+    """The prior_context if it describes a returning caller, else None (handles None / empty / malformed)."""
+    try:
+        if prior_context and int(prior_context.get("prior_calls") or 0) > 0:
+            return prior_context
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return None
+
+
+def _recall_candidates(v, prior):
+    L = v["LINES"]
+    bank = (prior.get("prior_entities") or {}).get("bank")
+    return ([L["recall"].format(bank=bank)] if bank else []) + [L["recall_nobank"]]
 
 
 def _pick(options, used, rng):
@@ -581,14 +622,20 @@ def _pick(options, used, rng):
     return rng.choice(fresh or options)
 
 
-def _readback(prev, now, v):
-    """If the caller just gave a new detail, the persona repeats it back (keeps them engaged and confirms it)."""
+def _readback(prev, now, v, prior_entities=None):
+    """If the caller just gave a new detail, the persona repeats it back (keeps them engaged and confirms it).
+    For a returning caller, a detail they gave on an earlier call is read back as "was that the same ... as before?"."""
     L = v["LINES"]
+    pe = prior_entities or {}
     if now.get("routing") and now.get("routing") != prev.get("routing"):
-        return L["rb_routing"].format(digits=_spell(now["routing"]))
+        key = "confirm_routing" if pe.get("routing") == now["routing"] else "rb_routing"
+        return L[key].format(digits=_spell(now["routing"]))
     if now.get("account") and now.get("account") != prev.get("account"):
-        return L["rb_account"].format(digits=_spell(now["account"]))
+        key = "confirm_account" if pe.get("account") == now["account"] else "rb_account"
+        return L[key].format(digits=_spell(now["account"]))
     if now.get("bank") and now.get("bank") != prev.get("bank"):
+        if pe.get("bank") and pe["bank"].lower() == now["bank"].lower():
+            return L["confirm_bank"].format(bank=now["bank"])
         return L["rb_bank"].format(bank=now["bank"])
     if now.get("amount") and now.get("amount") != prev.get("amount"):
         return L["rb_amount"].format(amount=_money(now["amount"]))
@@ -619,9 +666,11 @@ def _next_question(slots, used, rng, v):
     return None
 
 
-def reply(transcript, seed=None, persona_id=None):
+def reply(transcript, seed=None, persona_id=None, prior_context=None):
     """Return the persona's next line. `transcript` is the list of {speaker, text}, ending with the caller's message.
     persona_id picks the character voice (default: Dorothy); the logic is identical for all of them.
+    prior_context ({phone, prior_calls, prior_entities: {bank, routing, account}}) marks a returning scammer: the persona
+    hints once that the voice is familiar and asks to confirm details given before. None or prior_calls == 0 changes nothing.
     (The decoy's own turns are always stored with speaker 'Dorothy': it is the role marker, not the persona's name.)"""
     persona, v = _voice(persona_id)
     L, RESP, ctx = v["LINES"], v["RESPONSES"], _context(persona)
@@ -635,7 +684,8 @@ def reply(transcript, seed=None, persona_id=None):
     intent = intent_of(_spoken_digits_to_numbers(last))
 
     # A brand new detail always gets read back first.
-    readback = _readback(before, now, v)
+    prior = _repeat_prior(prior_context)
+    readback = _readback(before, now, v, (prior or {}).get("prior_entities"))
     question = _next_question(now, used, rng, v)
 
     # Gift cards / crypto: ask for the specifics scammers will happily give.
@@ -649,6 +699,12 @@ def reply(transcript, seed=None, persona_id=None):
             return L["gift_ask"]
     if now.get("method") == "bitcoin" and re.search(r"bitcoin|crypto|wallet", last.lower()) and "bitcoin" not in " ".join(used).lower():
         return L["bitcoin"]
+
+    # Returning scammer: hint (once per call) that we recognise them. Detected from our own earlier lines, so no extra state is needed.
+    if prior:
+        candidates = _recall_candidates(v, prior)
+        if not any(c in u for u in used for c in candidates):
+            return _trim(f"{candidates[0]} {readback}" if readback else candidates[0])
 
     if intent == "identity" and not now.get("money_requested"):
         org = now.get("org", L["identity_default_org"])
@@ -666,7 +722,7 @@ def reply(transcript, seed=None, persona_id=None):
         return _trim(f"{base} {L['callback']}")
 
     if readback:
-        follow = question or _pick(_stalls(now, v), used, rng)
+        follow = question or _pick(_stalls(now, v, prior), used, rng)
         return _trim(f"{readback} {follow}")
 
     if intent in ("money_move", "urgency", "compromised") and question and now.get("money_requested"):
@@ -676,12 +732,12 @@ def reply(transcript, seed=None, persona_id=None):
     if intent in RESP and intent not in ("other",):
         line = _pick([o.format(**ctx) for o in RESP[intent]], used, rng)
         if intent == "greeting" and dorothy_turns > 2:
-            line = question or _pick(_stalls(now, v), used, rng)
+            line = question or _pick(_stalls(now, v, prior), used, rng)
         return _trim(line)
 
     if question:
         return _trim(question)
-    pool = (_stalls(now, v) + RESP["other"]) if now.get("money_requested") else RESP["other"]
+    pool = (_stalls(now, v, prior) + RESP["other"]) if now.get("money_requested") else RESP["other"]
     return _trim(_pick(pool, used, rng))
 
 

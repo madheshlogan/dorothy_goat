@@ -62,6 +62,16 @@ def page(page:str, request:Request):
     name=f"{page}.html",
     context={"request": request, "page": page}
 )
+def _prior_context_for(call_id, transcript, stored=None):
+    """Same-scammer memory: has the phone number the caller gave us called before? Returns prior_context or None.
+    No number yet (or none ever) is fine: that just means no memory applies."""
+    phone=offline_dorothy.remember(transcript).get('phone')
+    if not phone: return stored
+    if stored and stored.get('phone')==db.normalize_phone(phone): return stored
+    ctx=db.build_prior_context(phone, exclude_call_id=call_id)
+    if ctx!=stored: db.save_prior_context(call_id, ctx)
+    return ctx
+
 def _resolve_persona(persona_id):
     if not personas.is_valid(persona_id): raise HTTPException(400,f'Unknown persona: {persona_id}')
     return personas.get_persona(persona_id)
@@ -87,7 +97,12 @@ def decoy_message(body:MessageIn):
     transcript=json.loads(row['transcript_json'])
     persona=personas.get_persona(row['persona_id'])  # the persona is fixed when the call starts
     transcript.append({'speaker':'Caller','text':body.text})
+    prior_ctx=_prior_context_for(body.call_id, transcript, db.load_prior_context(body.call_id))
     prompt=persona['system_prompt']
+    if prior_ctx and prior_ctx.get('prior_calls'):
+        bank=(prior_ctx.get('prior_entities') or {}).get('bank')
+        prompt+=(f"\nThis caller's phone number has called you {prior_ctx['prior_calls']} time(s) before"+(f", about {bank}" if bank else "")+
+                 ". Subtly hint that their voice or story sounds familiar, and ask just once if they are the same person who called before. Do not reveal everything you remember.")
     prior='\n'.join(f"{m['speaker']}: {m['text']}" for m in transcript[-10:])
     raw=gemini_text('Conversation so far:\n'+prior+"\n\nReply as Dorothy to the caller's latest message. Only Dorothy's words, no name label.",
                     system=prompt, max_tokens=300)
@@ -96,7 +111,7 @@ def decoy_message(body:MessageIn):
     if reply and len(reply.split())>45: reply=' '.join(reply.split()[:45])  # shorten, don't throw away
     if not reply:
         # Offline mode (or Gemini unavailable): rule-based Dorothy that follows the conversation.
-        reply=offline_dorothy.reply(transcript,persona_id=persona['id'])
+        reply=offline_dorothy.reply(transcript,persona_id=persona['id'],prior_context=prior_ctx)
     transcript.append({'speaker':'Dorothy','text':reply,'name':persona['name']})
     db.save_transcript(body.call_id,transcript,ended=False)
     return {'reply':reply,'transcript':transcript}
@@ -107,7 +122,7 @@ def end_call(call_id:str):
     if not call: raise HTTPException(404,'Call not found')
     transcript=json.loads(call['transcript_json'])
     db.save_transcript(call_id,transcript,ended=True)
-    result=extract(transcript)
+    result=extract(transcript, _prior_context_for(call_id, transcript, db.load_prior_context(call_id)))
     db.save_extraction(call_id,result); db.log_event('call_ended',f'Call {call_id} ended; extraction risk={result["risk_score"]}')
     return {'transcript':transcript,'extraction':result,'message':'Call saved and intelligence extracted.'}
 
@@ -115,7 +130,8 @@ def end_call(call_id:str):
 def extract_call(call_id:str):
     call=db.one('SELECT * FROM calls WHERE id=?',(call_id,))
     if not call: raise HTTPException(404,'Call not found')
-    result=extract(json.loads(call['transcript_json'])); db.save_extraction(call_id,result)
+    transcript=json.loads(call['transcript_json'])
+    result=extract(transcript, _prior_context_for(call_id, transcript, db.load_prior_context(call_id))); db.save_extraction(call_id,result)
     return result
 
 @app.post('/api/decoy/sample')
@@ -123,7 +139,7 @@ def sample_call(body:StartIn|None=None):
     persona=_resolve_persona(body.persona_id if body else personas.DEFAULT_PERSONA_ID)
     sample=tag_persona(SAMPLE_TRANSCRIPTS[persona['id']],persona)
     call_id=str(uuid.uuid4()); db.create_call(call_id,sample,persona['id']); db.save_transcript(call_id,sample,ended=True)
-    result=extract(sample); db.save_extraction(call_id,result); db.log_event('sample_call_loaded',f"Sample call {call_id} loaded ({persona['name']})")
+    result=extract(sample, _prior_context_for(call_id, sample)); db.save_extraction(call_id,result); db.log_event('sample_call_loaded',f"Sample call {call_id} loaded ({persona['name']})")
     return {'call_id':call_id,'persona_id':persona['id'],'transcript':sample,'extraction':result,'message':'Sample call loaded and extracted.'}
 
 @app.get('/api/analyst')
@@ -148,7 +164,7 @@ def analyst_data():
     if latest:
       try: latest_scripts=json.loads(latest[0]['extraction_json']).get('script_lines',[])
       except Exception: pass
-    return {'candidates':candidates,'calls':[{'id':c['id'],'transcript':json.loads(c['transcript_json']),'extraction':json.loads(c['extraction_json']) if c.get('extraction_json') else None} for c in calls], 'stats':stats,'latest_scripts':latest_scripts}
+    return {'candidates':candidates,'calls':[{'id':c['id'],'started_at':c['started_at'],'ended_at':c['ended_at'],'persona_id':c.get('persona_id'),'transcript':json.loads(c['transcript_json']),'extraction':json.loads(c['extraction_json']) if c.get('extraction_json') else None} for c in calls], 'stats':stats,'latest_scripts':latest_scripts}
 
 @app.get('/api/analyst/report/{call_id}')
 def analyst_report(call_id:str):
@@ -158,6 +174,15 @@ def analyst_report(call_id:str):
     short=re.sub(r'[^A-Za-z0-9_-]','',call_id[:8])
     return StreamingResponse(io.BytesIO(content),media_type=media_type,
         headers={'Content-Disposition':f'attachment; filename="dorothy_report_{short}.{ext}"','Content-Length':str(len(content))})
+
+@app.get('/api/analyst/caller/{phone_number}')
+def analyst_caller(phone_number:str):
+    phone=db.normalize_phone(phone_number)
+    if not phone: raise HTTPException(400,'Phone number must contain digits')
+    calls=db.get_calls_by_phone(phone)
+    return {'phone':phone,'call_count':len(calls),'repeat_caller':len(calls)>1,
+            'calls':[{k:c[k] for k in ('id','started_at','ended_at','risk_score','scam_type')} for c in calls],
+            'entities':db.get_prior_entities(phone)}
 
 @app.post('/api/watchlist/{item_id}/{action}')
 def review(item_id:int, action:str):
