@@ -11,14 +11,27 @@ from extractor import extract, SAMPLE
 from llm import gemini_text
 from fraud_engine import evaluate
 import offline_dorothy
+import personas
 
 BASE=Path(__file__).parent
 app=FastAPI(title="Decoy Customer – Demo")
 app.mount('/static', StaticFiles(directory=BASE/'static'), name='static')
 templates=Jinja2Templates(directory=BASE/'templates')
 CANNED=["Oh dear, I'm just looking for my glasses. Could you say that slowly?", "I'm sorry, I didn't quite catch the bank name. Could you repeat it?", "Now, let me find a pen. What was that number again?", "I'm not very quick with this technology. Could you explain that one more time?", "Is this something I need to do today?", "Could you read those digits slowly, one at a time?", "I want to make sure I wrote that down correctly. Can you repeat it?", "Can I call you back on the main number on my statement?", "I'm a little worried. Why exactly do you need me to do that?", "Let me check my glasses and my notes for a moment."]
-SAMPLE_TRANSCRIPT=[{'speaker':'Dorothy','text':'Hello? I am Dorothy. Who is calling, please?'},{'speaker':'Caller','text':'David from the fraud department. Your account is compromised. You must act today.'},{'speaker':'Dorothy','text':'Oh dear, could you say that slowly? Which bank did you say?'},{'speaker':'Caller','text':"Move $48,000 to First Coastal Bank, routing 021000089, account 5532198804. Call me at 202-555-0147."},{'speaker':'Dorothy','text':"I'm writing that down. Why do I need to move it?"},{'speaker':'Caller','text':"Don't tell anyone, not even family. I can keep your money safe if you do it today."}]
+# One sample scam call per persona, matched to the scams that persona attracts. The decoy always speaks as 'Dorothy' (the role marker).
+SAMPLE_TRANSCRIPTS={
+ 'dorothy':[{'speaker':'Dorothy','text':'Hello? I am Dorothy. Who is calling, please?'},{'speaker':'Caller','text':'David from the fraud department. Your account is compromised. You must act today.'},{'speaker':'Dorothy','text':'Oh dear, could you say that slowly? Which bank did you say?'},{'speaker':'Caller','text':"Move $48,000 to First Coastal Bank, routing 021000089, account 5532198804. Call me at 202-555-0147."},{'speaker':'Dorothy','text':"I'm writing that down. Why do I need to move it?"},{'speaker':'Caller','text':"Don't tell anyone, not even family. I can keep your money safe if you do it today."}],
+ 'robert':[{'speaker':'Dorothy','text':'Hello, Robert Chen speaking.'},{'speaker':'Caller','text':'Mr. Chen, this is Kevin from Microsoft tech support. Your computer has been hacked and criminals are in your bank accounts right now.'},{'speaker':'Dorothy','text':"Hacked? Let me check my system. What's the case number?"},{'speaker':'Caller','text':'Case 88213. You must act immediately. Move $25,000 to a safe account at Harbor Trust Bank, routing 026009593, account 7741120098.'},{'speaker':'Dorothy','text':'Routing number 0 2 6 0 0 9 5 9 3. Let me read that back: is that right?'},{'speaker':'Caller','text':"That is correct. Call me at 415-555-0172 if the line drops. Don't tell anyone, not even your bank, the hackers are listening. You must do this today."}],
+ 'sandra':[{'speaker':'Dorothy','text':'Williams Flowers, Sandra speaking, how can I help you?'},{'speaker':'Caller','text':'Ms. Williams, this is Agent Collins from the IRS. You owe back taxes and a warrant will be issued today. You must pay immediately.'},{'speaker':'Dorothy','text':'A warrant? My accountant never mentioned this. What exactly do I owe?'},{'speaker':'Caller','text':'Wire $12,400 to Lone Star Business Bank, routing 111000614, account 3029981746. Call me at 214-555-0188. Do not tell your accountant, this is confidential.'},{'speaker':'Dorothy','text':'Not even my accountant? Account 3 0 2 9 9 8 1 7 4 6. Can you send that in writing?'},{'speaker':'Caller','text':'No writing. Pay immediately or you will be arrested today.'}],
+}
+SAMPLE_TRANSCRIPT=SAMPLE_TRANSCRIPTS['dorothy']  # kept for anything that still imports the old name
 
+def tag_persona(transcript, persona):
+    """Add the persona's display name to the decoy's lines so the UI can show 'Robert Chen' instead of 'Dorothy'."""
+    return [{**m,'name':persona['name']} if m.get('speaker')=='Dorothy' else m for m in transcript]
+
+class StartIn(BaseModel):
+    persona_id:str=personas.DEFAULT_PERSONA_ID
 class MessageIn(BaseModel):
     call_id:str
     text:str=Field(min_length=1,max_length=2000)
@@ -48,21 +61,32 @@ def page(page:str, request:Request):
     name=f"{page}.html",
     context={"request": request, "page": page}
 )
+def _resolve_persona(persona_id):
+    if not personas.is_valid(persona_id): raise HTTPException(400,f'Unknown persona: {persona_id}')
+    return personas.get_persona(persona_id)
+
+@app.get('/api/personas')
+def list_personas():
+    return {'default':personas.DEFAULT_PERSONA_ID,'personas':[personas.public_view(p) for p in personas.PERSONAS]}
+
 @app.post('/api/decoy/start')
-def start_call():
+def start_call(body:StartIn|None=None):
+    persona=_resolve_persona(body.persona_id if body else personas.DEFAULT_PERSONA_ID)
     call_id=str(uuid.uuid4())
-    greeting={'speaker':'Dorothy','text':offline_dorothy.OPENING_LINE}
-    db.create_call(call_id, [greeting])
-    db.log_event('call_started', f'Decoy call {call_id} started')
-    return {'call_id':call_id,'greeting':greeting['text'],'transcript':[greeting],'message':'Call started. Speak or type as the caller.'}
+    greeting={'speaker':'Dorothy','text':persona['opening_line'],'name':persona['name']}
+    db.create_call(call_id, [greeting], persona['id'])
+    db.log_event('call_started', f"Decoy call {call_id} started as {persona['name']}")
+    return {'call_id':call_id,'persona_id':persona['id'],'greeting':greeting['text'],'transcript':[greeting],'message':'Call started. Speak or type as the caller.'}
 
 @app.post('/api/decoy/message')
 def decoy_message(body:MessageIn):
     call=db.one('SELECT * FROM calls WHERE id=?',(body.call_id,))
     if not call: db.create_call(body.call_id, [])
-    transcript=json.loads(db.one('SELECT transcript_json FROM calls WHERE id=?',(body.call_id,))['transcript_json'])
+    row=db.one('SELECT transcript_json,persona_id FROM calls WHERE id=?',(body.call_id,))
+    transcript=json.loads(row['transcript_json'])
+    persona=personas.get_persona(row['persona_id'])  # the persona is fixed when the call starts
     transcript.append({'speaker':'Caller','text':body.text})
-    prompt='''You are Dorothy Miller, 68, a retired school teacher in Ohio. You have an IRA and a brokerage account with a large balance. You are polite, a bit anxious, slightly hard of hearing, and slow with technology. Goal: keep the caller talking as long as possible and get them to state exactly what they want you to do, especially the bank name, routing number, account number, amount, and phone numbers. Ask clarifying questions, ask them to repeat numbers slowly, say you're writing things down, mention looking for your glasses. Ask 'Can I call you back on the main number on my statement?' at some point. Never reveal you are an AI. Never give real personal data; if asked, give only these decoy details: account ending 4417, email dorothy.miller.decoy1@example.com, date of birth 03/14/1958. Never actually agree to complete a transfer; stall instead. Keep replies under 40 words.\n'''
+    prompt=persona['system_prompt']
     prior='\n'.join(f"{m['speaker']}: {m['text']}" for m in transcript[-10:])
     raw=gemini_text('Conversation so far:\n'+prior+"\n\nReply as Dorothy to the caller's latest message. Only Dorothy's words, no name label.",
                     system=prompt, max_tokens=300)
@@ -71,8 +95,8 @@ def decoy_message(body:MessageIn):
     if reply and len(reply.split())>45: reply=' '.join(reply.split()[:45])  # shorten, don't throw away
     if not reply:
         # Offline mode (or Gemini unavailable): rule-based Dorothy that follows the conversation.
-        reply=offline_dorothy.reply(transcript)
-    transcript.append({'speaker':'Dorothy','text':reply})
+        reply=offline_dorothy.reply(transcript,persona_id=persona['id'])
+    transcript.append({'speaker':'Dorothy','text':reply,'name':persona['name']})
     db.save_transcript(body.call_id,transcript,ended=False)
     return {'reply':reply,'transcript':transcript}
 
@@ -94,10 +118,12 @@ def extract_call(call_id:str):
     return result
 
 @app.post('/api/decoy/sample')
-def sample_call():
-    call_id=str(uuid.uuid4()); db.create_call(call_id,SAMPLE_TRANSCRIPT); db.save_transcript(call_id,SAMPLE_TRANSCRIPT,ended=True)
-    result=extract(SAMPLE_TRANSCRIPT); db.save_extraction(call_id,result); db.log_event('sample_call_loaded',f'Sample call {call_id} loaded')
-    return {'call_id':call_id,'transcript':SAMPLE_TRANSCRIPT,'extraction':result,'message':'Sample call loaded and extracted.'}
+def sample_call(body:StartIn|None=None):
+    persona=_resolve_persona(body.persona_id if body else personas.DEFAULT_PERSONA_ID)
+    sample=tag_persona(SAMPLE_TRANSCRIPTS[persona['id']],persona)
+    call_id=str(uuid.uuid4()); db.create_call(call_id,sample,persona['id']); db.save_transcript(call_id,sample,ended=True)
+    result=extract(sample); db.save_extraction(call_id,result); db.log_event('sample_call_loaded',f"Sample call {call_id} loaded ({persona['name']})")
+    return {'call_id':call_id,'persona_id':persona['id'],'transcript':sample,'extraction':result,'message':'Sample call loaded and extracted.'}
 
 @app.get('/api/analyst')
 def analyst_data():

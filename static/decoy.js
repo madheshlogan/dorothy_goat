@@ -1,11 +1,12 @@
-// Decoy call screen: talk to Dorothy by voice or text.
+// Decoy call screen: talk to the chosen decoy persona by voice or text.
+let personaList = [], persona = null, callInProgress = false;
 let callId = null, transcript = [], recognition = null, sending = false;
 let wantMic = false;          // the user has switched the microphone on
 let dorothySpeaking = false;  // pause listening while Dorothy talks, so she doesn't hear herself
 const $ = id => document.getElementById(id);
 
 // ---------------------------------------------------------------------------
-// Dorothy's voice: pick an older-sounding FEMALE voice.
+// The decoy's voice: pick a voice matching the persona (female by default, male for Robert).
 // Browsers load voices asynchronously; calling getVoices() too early returns an
 // empty list and the browser falls back to its default voice (often male).
 // ---------------------------------------------------------------------------
@@ -13,11 +14,14 @@ const FEMALE = /(female|woman|zira|aria|jenny|michelle|ava|emma|samantha|karen|m
 const MALE = /(\bmale\b|david|mark|guy|daniel|alex\b|fred|george|ryan|thomas|james|eric|christopher|roger|ralph|brian|andrew|steffan|davis|tony|jason|google uk english male)/i;
 let voices = [];
 
+function wantedGender() { return persona && persona.voice_gender === 'male' ? 'male' : 'female'; }
+
 function rankVoice(v) {
   if (!/^en/i.test(v.lang)) return -1;
-  if (MALE.test(v.name)) return -1;
+  const male = wantedGender() === 'male';
+  if (male ? FEMALE.test(v.name) : MALE.test(v.name)) return -1;
   let score = 0;
-  if (FEMALE.test(v.name)) score += 10;
+  if ((male ? MALE : FEMALE).test(v.name)) score += 10;
   if (/natural|online|neural|enhanced|premium/i.test(v.name)) score += 3;  // smoother voices
   if (/en[-_](US|GB)/i.test(v.lang)) score += 1;
   return score;
@@ -30,13 +34,13 @@ function loadVoices() {
   const english = voices.filter(v => /^en/i.test(v.lang));
   const sorted = english.slice().sort((a, b) => rankVoice(b) - rankVoice(a));
   let saved = null;
-  try { saved = localStorage.getItem('dorothyVoice'); } catch (e) {}
+  try { saved = localStorage.getItem('decoyVoice_' + wantedGender()); } catch (e) {}
   select.innerHTML = sorted.map(v =>
     `<option value="${esc(v.name)}">${esc(v.name)}${rankVoice(v) >= 10 ? ' ★' : ''}</option>`).join('');
   const best = sorted.find(v => v.name === saved) || sorted.find(v => rankVoice(v) >= 0) || sorted[0];
   if (best) select.value = best.name;
   if (best && rankVoice(best) < 10) {
-    $('voiceHint').textContent = 'No female voice found on this computer. Pick one from the list, or use Chrome / Edge.';
+    $('voiceHint').textContent = `No ${wantedGender()} voice found on this computer. Pick one from the list, or use Chrome / Edge.`;
   } else {
     $('voiceHint').textContent = '';
   }
@@ -53,8 +57,9 @@ function speak(text) {
   const u = new SpeechSynthesisUtterance(text);
   const v = dorothyVoice();
   if (v) { u.voice = v; u.lang = v.lang; }
-  u.rate = 0.82;   // slow, like an older lady
-  u.pitch = 1.05;  // soft, slightly higher
+  const male = wantedGender() === 'male';
+  u.rate = male ? 0.95 : 0.82;   // Dorothy speaks slowly; Robert at a normal pace
+  u.pitch = male ? 0.9 : 1.05;
   pauseListening();
   dorothySpeaking = true;
   const done = () => { if (!dorothySpeaking) return; dorothySpeaking = false; resumeListening(); };
@@ -72,11 +77,11 @@ if ('speechSynthesis' in window) {
 }
 
 function onVoiceChange() {
-  try { localStorage.setItem('dorothyVoice', $('voiceSelect').value); } catch (e) {}
+  try { localStorage.setItem('decoyVoice_' + wantedGender(), $('voiceSelect').value); } catch (e) {}
 }
 
 function testVoice() {
-  speak("Hello, dear. This is Dorothy. Could you say that again a little slower?");
+  speak(persona ? persona.opening_line : 'Hello?');
 }
 
 // ---------------------------------------------------------------------------
@@ -159,15 +164,20 @@ function toggleMic() {
 function renderTranscript() {
   const el = $('transcript');
   el.innerHTML = transcript.map(m =>
-    `<div class="bubble ${m.speaker === 'Dorothy' ? 'dorothy' : 'caller'}"><strong>${esc(m.speaker)}</strong><p>${esc(m.text)}</p></div>`).join('');
+    `<div class="bubble ${m.speaker === 'Dorothy' ? 'dorothy' : 'caller'}"><strong>${esc(m.name || m.speaker)}</strong><p>${esc(m.text)}</p></div>`).join('');
   el.scrollTop = el.scrollHeight;
 }
 
 async function startCall() {
   try {
-    const r = await fetch('/api/decoy/start', { method: 'POST' });
+    const r = await fetch('/api/decoy/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ persona_id: persona ? persona.id : 'dorothy' })
+    });
     const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || 'Request failed');
     callId = d.call_id;
+    setCallInProgress(true);
     transcript = d.transcript || [];
     renderTranscript();
     $('callStatus').textContent = 'Call in progress';
@@ -229,6 +239,7 @@ async function endCall() {
     $('startBtn').disabled = false;
     $('endBtn').disabled = true;
     $('micBtn').disabled = true;
+    setCallInProgress(false);
   } catch (e) {
     $('decoyNotice').textContent = 'Could not end call cleanly. Try again.';
   }
@@ -236,7 +247,10 @@ async function endCall() {
 
 async function loadSample() {
   try {
-    const r = await fetch('/api/decoy/sample', { method: 'POST' });
+    const r = await fetch('/api/decoy/sample', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ persona_id: persona ? persona.id : 'dorothy' })
+    });
     const d = await r.json();
     callId = d.call_id;
     transcript = d.transcript;
@@ -252,3 +266,44 @@ async function loadSample() {
     $('decoyNotice').textContent = 'Could not load sample call. Refresh and try again.';
   }
 }
+
+// ---------------------------------------------------------------------------
+// Persona selector (locked while a call is in progress)
+// ---------------------------------------------------------------------------
+function renderPersonaCards() {
+  $('personaCards').innerHTML = personaList.map(p => `
+    <button type="button" class="persona-card${persona && p.id === persona.id ? ' selected' : ''}" role="radio"
+            aria-checked="${persona && p.id === persona.id}" data-id="${esc(p.id)}" ${callInProgress ? 'disabled' : ''}>
+      <strong>${esc(p.name)}, ${esc(p.age)}</strong>
+      ${esc(p.background)}
+      <span class="attracts">Attracts: ${esc(p.scam_types_attracted.join(', '))}</span>
+    </button>`).join('');
+  document.querySelectorAll('.persona-card').forEach(b => b.addEventListener('click', () => selectPersona(b.dataset.id)));
+}
+
+function selectPersona(id) {
+  if (callInProgress) return;
+  persona = personaList.find(p => p.id === id) || persona;
+  $('heroTitle').textContent = 'Talk to ' + persona.name;
+  $('voiceLabel').textContent = persona.name.split(' ')[0] + "'s voice";
+  renderPersonaCards();
+  loadVoices();  // re-rank voices for the persona's gender
+}
+
+function setCallInProgress(on) {
+  callInProgress = on;
+  renderPersonaCards();
+  $('personaLock').classList.toggle('hidden', !on);
+}
+
+async function loadPersonas() {
+  try {
+    const d = await (await fetch('/api/personas')).json();
+    personaList = d.personas;
+    persona = personaList.find(p => p.id === d.default) || personaList[0];
+    selectPersona(persona.id);
+  } catch (e) {
+    $('personaCards').innerHTML = '<p class="muted">Could not load personas. Refresh the page. Dorothy will be used.</p>';
+  }
+}
+loadPersonas();

@@ -21,7 +21,8 @@ def init_db():
         c.executescript("""
         CREATE TABLE IF NOT EXISTS calls(
           id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT,
-          transcript_json TEXT NOT NULL DEFAULT '[]', extraction_json TEXT
+          transcript_json TEXT NOT NULL DEFAULT '[]', extraction_json TEXT,
+          persona_id TEXT NOT NULL DEFAULT 'dorothy'
         );
         CREATE TABLE IF NOT EXISTS watchlist(
           id INTEGER PRIMARY KEY AUTOINCREMENT, item_type TEXT NOT NULL, value TEXT NOT NULL,
@@ -48,7 +49,14 @@ def init_db():
           id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL
         );
         """)
+        migrate(c)
         seed_customer(c)
+
+def migrate(c):
+    """Databases created before personas existed lack calls.persona_id. SQLite has no ADD COLUMN IF NOT EXISTS, so check first."""
+    cols = {r[1] for r in c.execute("PRAGMA table_info(calls)").fetchall()}
+    if 'persona_id' not in cols:
+        c.execute("ALTER TABLE calls ADD COLUMN persona_id TEXT NOT NULL DEFAULT 'dorothy'")
 
 def seed_customer(c=None):
     own = c is None
@@ -69,10 +77,10 @@ def log_event(event_type, detail):
     with connect() as c:
         c.execute("INSERT INTO events(type,detail,created_at) VALUES(?,?,?)", (event_type, detail, now_iso()))
 
-def create_call(call_id, transcript=None):
+def create_call(call_id, transcript=None, persona_id='dorothy'):
     with connect() as c:
-        c.execute("INSERT OR IGNORE INTO calls(id,started_at,transcript_json) VALUES(?,?,?)",
-                  (call_id, now_iso(), json.dumps(transcript or [])))
+        c.execute("INSERT OR IGNORE INTO calls(id,started_at,transcript_json,persona_id) VALUES(?,?,?,?)",
+                  (call_id, now_iso(), json.dumps(transcript or []), persona_id))
 
 def save_transcript(call_id, transcript, ended=True):
     with connect() as c:
@@ -109,3 +117,4 @@ def one(query, params=()):
     with connect() as c:
         r = c.execute(query, params).fetchone()
         return dict(r) if r else None
+

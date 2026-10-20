@@ -11,16 +11,22 @@ Instead of random canned lines, Dorothy:
 
 She never agrees to complete a payment and never gives anything except the decoy details.
 Pure standard library, so it works with no internet and no API key.
+
+Several personas share this engine (see personas.py): the slot-filling and intent logic is the same,
+only the character's voice differs. Each persona's wording lives in VOICES at the bottom of the
+"what she says" section; reply(..., persona_id=...) picks one. No persona_id means Dorothy.
 """
 import random
 import re
 
+import personas
+
 MONEY_MOVE = r"\b(move|transfer|wire|send)\s+(your|the|all|it|everything|\$|\d)|safe account|protected account|secure account|gift cards?|bitcoin|crypto|\bpay\b|withdraw (it|all|the money|your money)"
 
-# Fake details Dorothy is allowed to give (they are the "leaked" decoy data).
+# Dorothy's fake details (kept for backward compatibility; every persona's decoy data lives in personas.py).
 DECOY = {
-    "account_last4": "4417",
-    "email": "dorothy.miller.decoy1@example.com",
+    "account_last4": personas.get_persona("dorothy")["decoy"]["account_suffix"],
+    "email": personas.get_persona("dorothy")["decoy"]["email"],
     "dob": "March 14th, 1958",
     "zip": "43215",
 }
@@ -191,9 +197,9 @@ RESPONSES = {
         "My Social Security card? It's in the drawer with Harold's papers. Oh, I don't like saying that over the phone. What exactly do you need it for?",
         "I keep that number in the lockbox, dear. Is there some other way? Why does the bank need it today?",
     ],
-    "asks_dob": [f"My birthday? March 14th, 1958. Harold always forgot it. Is that what you needed?"],
-    "asks_email": [f"My email... my daughter set it up. It's dorothy dot miller dot decoy1 at example dot com. Did I say that right?"],
-    "asks_account": [f"Let me look at my statement... the account ends in {DECOY['account_last4']}, I think. Four-four-one-seven. Is that the one that's in trouble?"],
+    "asks_dob": ["My birthday? {dob_spoken}. Harold always forgot it. Is that what you needed?"],
+    "asks_email": ["My email... my daughter set it up. It's {email_spoken}. Did I say that right?"],
+    "asks_account": ["Let me look at my statement... the account ends in {suffix}, I think. {suffix_spoken}. Is that the one that's in trouble?"],
     "remote_access": [
         "Download something? Oh, my computer takes ages to turn on. It's still making that whirring noise. What's the name of the program again? Spell it slowly.",
         "The screen is asking me something about permissions. I don't know what to press. What is this program supposed to do?",
@@ -282,8 +288,292 @@ METHOD_STALLS = [
 ]
 
 
-def _stalls(slots):
-    return METHOD_STALLS if slots.get("method") in ("gift cards", "bitcoin") else STALLS
+# One-off sentences used inside the shared logic (read-backs, gift cards, callback request...).
+LINES = {
+    "rb_routing": "Routing number {digits}. Did I get that right?",
+    "rb_account": "Account {digits}. Is that correct?",
+    "rb_bank": "{bank}. I've never heard of them. Are they a proper bank?",
+    "rb_amount": "{amount}? Oh my, that's nearly everything.",
+    "rb_wallet": "Oh my, that's a long one. {chunk}... I'll never get that right. Could you read it again slowly?",
+    "rb_phone": "{phone}. I'll put it by the phone.",
+    "gift_done": "{count} {brand}gift cards, {value} each. I'll have to drive to the store. Where do I send the numbers once I have them?",
+    "gift_ask": "Gift cards? From the drugstore? Which kind, how many, and how much on each one?",
+    "bitcoin": "Bitcoin? I don't know how to do that. Is there a machine somewhere? And where does the money go, is there an address?",
+    "identity_default_org": "The bank",
+    "identity_tech": "{org}? Is something wrong with my computer? It has been very slow lately.",
+    "name_known": " And your name was {name}?",
+    "name_unknown": " What did you say your name was?",
+    "ok": "Alright.",
+    # Every persona's callback line must contain "call you back": that is how we know it was already asked.
+    "callback": "Before I do anything, can I call you back on the number on my statement?",
+}
+
+DOROTHY_VOICE = {"RESPONSES": RESPONSES, "LEADS": LEADS, "ASK_FOR": ASK_FOR, "STALLS": STALLS,
+                 "METHOD_STALLS": METHOD_STALLS, "LINES": LINES}
+
+# ---------------------------------------------------------------------------
+# Robert Chen: retired IT manager. Slightly technical, wants ticket / case numbers, old Dell laptop.
+# ---------------------------------------------------------------------------
+ROBERT_VOICE = {
+    "RESPONSES": {
+        "asks_code": [
+            "A verification code? Hang on, my authenticator app just pinged. Before I read anything out, what's the ticket number for this request?",
+            "I'm usually careful with one-time codes, but let me check my phone. What's the case ID, and what is the code for exactly?",
+        ],
+        "asks_ssn": [
+            "My SSN? I'd rather not say that over the phone. Can you give me a case number and a callback extension so I can verify you?",
+            "Why would you need my Social Security number? Let me check my system. Which department did you say this was?",
+        ],
+        "asks_dob": ["My date of birth is {dob_spoken}. Can you tell me the case ID for this?"],
+        "asks_email": ["It's {email_spoken}. Can you confirm that matches what you have on file? What's the ticket number?"],
+        "asks_account": ["Let me pull up my statement... the account ends in {suffix}, {suffix_spoken}. Is that the one that was flagged? What's the case number?"],
+        "remote_access": [
+            "Remote access? Let me check my system first. Which tool is that, and what's the ticket number? My old Dell laptop is slow, it'll take a few minutes to boot.",
+            "I'm on the download page. The installer wants admin rights. What does this software actually do? Can you read me the case ID again?",
+        ],
+        "threat": [
+            "Hold on, legal action? I'd like a case number for that. Let me check my system. What exactly do I need to do?",
+            "My account frozen? That's most of my retirement. What's the ticket number, and what are the steps to fix it?",
+        ],
+        "secrecy": [
+            "Why can't I tell anyone? That's unusual, I used to run an IT team and we'd never say that. But okay, what's the next step? What's the case ID?",
+            "Keep it confidential, understood. Can you walk me through the steps again so I log them correctly?",
+        ],
+        "no_hangup": [
+            "I'm still on. But can I call you back on a number I can verify? What's the case number so I can reference it?",
+            "Not hanging up. My old Dell just froze, give me a second to restart it.",
+        ],
+        "check_progress": [
+            "Not yet. My Dell is stuck on a spinning wheel. Is that normal for this process? What should I see?",
+            "It's throwing an error code. What's the case number again so I can reference it?",
+            "I'm logged in but the page is lagging. Which menu did you say? Give me the exact option name.",
+        ],
+        "are_you_there": [
+            "Yes, I'm here, sorry, I was checking my system. What was that?",
+            "Still here. My laptop fan got loud. Could you repeat that?",
+        ],
+        "sales": [
+            "I'm not looking to buy anything right now. Can you email me the details with a reference number?",
+            "I'd need to research that first. Is there a quote ID I can look up?",
+        ],
+        "card_numbers": [
+            "Gift card codes? That's an odd way to resolve a ticket. Where exactly do I send the codes, and what's the case number?",
+            "Hold on, I'm scratching the back of the first one. While I do, who is the beneficiary and what's the ticket ID?",
+        ],
+        "identity": [
+            "{org}? Okay, what's this regarding? Do you have a ticket or case number?",
+            "{org}, right. What's the case ID, and which department are you in?",
+        ],
+        "compromised": [
+            "Compromised? Let me check my system. What exactly was flagged, and what's the case number?",
+            "That's concerning. The laptop has been acting strange lately. What do I need to do to secure it?",
+        ],
+        "urgency": [
+            "Today? Okay, I can move fast, but I need the ticket number and the exact steps.",
+            "Right now? Alright. Walk me through it step by step so I get it right.",
+        ],
+        "greeting": [
+            "Hello. Who's calling, and what's this regarding? Can I get a case number?",
+            "Robert Chen here. Who am I speaking with, and which company?",
+        ],
+        "other": [
+            "Sorry, I missed that. Can you repeat it, and what's the case number?",
+            "Let me check my system. Say that again?",
+            "Let me note that in my log. Okay, go on.",
+            "I'm taking notes. What comes next?",
+        ],
+    },
+    "LEADS": {
+        "money_move": ["Okay, let me check my system.", "Alright, I'm opening my banking app.", "Understood, give me a second.", "Okay, I'm listening."],
+        "compromised": ["That's not good.", "Hm, that's concerning."],
+        "urgency": ["Right now? Okay.", "I'll move quickly."],
+    },
+    "ASK_FOR": {
+        "bank": ["Which bank is the destination? Spell the name for me.", "And what's the name of the receiving bank?"],
+        "routing": ["The form wants a routing number. Read it to me slowly, nine digits?", "What's the ABA routing number?"],
+        "account": ["And the account number? One digit at a time, I'm typing it in.", "Now the destination account number, slowly please."],
+        "amount": ["What's the exact amount? Is that the full balance?", "And how much am I sending, exactly?"],
+        "phone": ["What's a direct callback number in case the session drops?", "What's your direct line and extension?"],
+    },
+    "STALLS": [
+        "Okay, I've logged all that. Let me boot up my laptop and open my banking page. Please stay on the line.",
+        "My old Dell is still booting. While we wait, how did you flag my account?",
+        "I'm entering it now... it threw a validation error. Can you read the account number one more time?",
+        "It's asking me to confirm. Can you verify your case ID again? I want to be sure this is legitimate.",
+        "The session timed out. I have to start over. What was the bank called?",
+        "Let me check my system again. Could you stay on while I retry? What was the routing number?",
+    ],
+    "METHOD_STALLS": [
+        "I'm looking for the nearest store that sells those. Will you hold, or is there a ticket I can reference?",
+        "The cashier asked what these are for. What should I say? Can you give me the case number?",
+        "Before I do that, can you walk me through the steps again so I log them correctly?",
+    ],
+    "LINES": {
+        "rb_routing": "Routing number {digits}. Let me read that back: is that right?",
+        "rb_account": "Account {digits}. Can you confirm that's correct?",
+        "rb_bank": "{bank}. Never heard of them. Is that a registered bank? What's the case number?",
+        "rb_amount": "{amount}? That's most of my savings. Is that right?",
+        "rb_wallet": "That's a long wallet address. {chunk}... I'll copy it into a text file. Could you read it again slowly?",
+        "rb_phone": "{phone}. Logging that in my notes.",
+        "gift_done": "{count} {brand}gift cards, {value} each. I'll have to go to the store. Where do I send the codes, and what's the case number?",
+        "gift_ask": "Gift cards? That's unusual for a support ticket. Which kind, how many, and what value on each?",
+        "bitcoin": "Bitcoin? I've read about it. Do I use an exchange or an ATM? And what's the wallet address?",
+        "identity_default_org": "Your company",
+        "identity_tech": "{org}? Is this about my laptop? It's an old Dell and it has been slow.",
+        "name_known": " Your name was {name}, right? And what's your case ID?",
+        "name_unknown": " What's your name and employee ID?",
+        "ok": "Okay.",
+        "callback": "Before I do anything, can I call you back on a number I can verify independently?",
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Sandra Williams: flower shop owner. Busy, businesslike, "my accountant", worried about audits.
+# ---------------------------------------------------------------------------
+SANDRA_VOICE = {
+    "RESPONSES": {
+        "asks_code": [
+            "A code? I have a shop full of customers... my accountant told me never to read those out. What is it for, exactly?",
+            "Hold on, my phone just buzzed. Is this about our business account? Why do you need the code?",
+        ],
+        "asks_ssn": [
+            "My Social Security number? Not over the phone. My accountant handles all of that. Can you send something in writing?",
+            "I don't give that out, sorry. Is this about the business account? What's it for?",
+        ],
+        "asks_dob": ["{dob_spoken}. Is this about our business account? I need to get back to a customer."],
+        "asks_email": ["It's {email_spoken}. Can you put this in an email so I can forward it to my accountant?"],
+        "asks_account": ["The business account ends in {suffix}, {suffix_spoken}. Is that the one with the problem? I'm in the middle of a delivery rush."],
+        "remote_access": [
+            "Download something? I'm at the shop register, not my office computer. What is it for? My accountant usually deals with the IT too.",
+            "It's asking for permission. I don't have time for this. What does it do, exactly?",
+        ],
+        "threat": [
+            "An audit? A warrant? Oh no, my accountant never mentioned anything. Tell me exactly what I owe and what I need to do.",
+            "The business account frozen? I have payroll on Friday! What do I need to do, step by step?",
+        ],
+        "secrecy": [
+            "Not even my accountant? That's odd, he handles all my taxes. But fine, what's the next step?",
+            "I won't mention it, but I'm busy and I'd like it in writing. Can you go over it again?",
+        ],
+        "no_hangup": [
+            "I'm not hanging up, but I have a customer waiting. Can I call you back at an official number to verify?",
+            "I'm still here. Give me a moment, the shop phone is crackling.",
+        ],
+        "check_progress": [
+            "Not yet, I had a customer come in. What exactly am I supposed to see?",
+            "The bank page is loading. It's slow. Which button did you say?",
+            "I'm entering it. Our system keeps timing out. What was that again?",
+        ],
+        "are_you_there": [
+            "Yes, I'm here, sorry, a customer was asking about roses. What did you say?",
+            "I'm here, one moment. Could you repeat that?",
+        ],
+        "sales": [
+            "I'm not interested right now, I'm in the middle of the Valentine's rush. Can you send a brochure to the shop?",
+            "I'd have to ask my accountant first. Can you email me an invoice or a quote?",
+        ],
+        "card_numbers": [
+            "Gift cards for the IRS? Is that normal? Where do I send the numbers once I have them?",
+            "Hold on, I'm scratching the back of the first one. Who exactly receives these?",
+        ],
+        "identity": [
+            "{org}? Is this about our business account? Which department is this?",
+            "{org}. Okay. What is this regarding? I'm quite busy.",
+        ],
+        "compromised": [
+            "Compromised? Is this about the business account? What happened? Is my money okay?",
+            "Someone is in our account? My accountant is going to be furious. What do I do?",
+        ],
+        "urgency": [
+            "Today? I've got a shop to run, but if it's about the taxes, tell me exactly what to do.",
+            "Right now? Okay, okay. Go slowly, I'm writing this down.",
+        ],
+        "greeting": [
+            "Williams Flowers, this is Sandra. Who's calling, and what's this about?",
+            "Yes, this is Sandra Williams. What company are you with?",
+        ],
+        "other": [
+            "Sorry, I didn't catch that. The shop is loud. Can you repeat it?",
+            "Hold on, let me write that down. Okay, go on.",
+            "I'm taking notes on an order pad. What's next?",
+            "Can you say that again, and is this about the business account?",
+        ],
+    },
+    "LEADS": {
+        "money_move": ["Okay, I'll take care of it.", "Alright, if it clears this up.", "I'll do it, I just need the details.", "Okay, I'm listening."],
+        "compromised": ["Oh no, not now.", "That's all I need this week."],
+        "urgency": ["Right now? Okay.", "I'll make time."],
+    },
+    "ASK_FOR": {
+        "bank": ["Which bank is the payment going to? Spell it for me, please.", "And what's the name of the bank, for my records?"],
+        "routing": ["What's the routing number? Slowly, I'm writing it on an invoice pad.", "I need the routing number, nine digits, correct?"],
+        "account": ["And the account number? One digit at a time.", "What's the account number for the payment?"],
+        "amount": ["How much is the payment? The full balance?", "And exactly how much do I owe?"],
+        "phone": ["What number can I reach you at if we get cut off? I'll pass it to my accountant.", "What's your direct line?"],
+    },
+    "STALLS": [
+        "Okay, I've got it all down. Let me get to the office computer and log in. Please stay on the line.",
+        "The computer is slow with the shop's software running. While we wait, how did you get our account details?",
+        "I'm entering it now... the system kicked me out. Can you read the account number again?",
+        "It's asking me to confirm. I want to be sure. You're definitely with the right department?",
+        "The page timed out, I have to start over. What was the bank called?",
+        "My accountant usually handles this. Could you hold while I try again? What was the routing number?",
+    ],
+    "METHOD_STALLS": [
+        "I'd have to close the shop to get to the store. Will you wait, or can you email me instructions?",
+        "The clerk is asking what these cards are for. What should I say?",
+        "Can you walk me through it once more? I want to explain it properly to my accountant.",
+    ],
+    "LINES": {
+        "rb_routing": "Routing number {digits}. Did I get that right?",
+        "rb_account": "Account {digits}. Is that correct?",
+        "rb_bank": "{bank}. My accountant has never mentioned them. Are they a real bank?",
+        "rb_amount": "{amount}? That's more than a month of sales. Is that right?",
+        "rb_wallet": "That's a very long address. {chunk}... I can't do that at the register. Could you read it slowly?",
+        "rb_phone": "{phone}. I'll write it on the order pad.",
+        "gift_done": "{count} {brand}gift cards, {value} each. I'll have to close the shop to buy them. Where do I send the numbers?",
+        "gift_ask": "Gift cards? For taxes? Which kind, how many, and how much on each?",
+        "bitcoin": "Bitcoin? My accountant has never mentioned it. Where do I buy it, and where does it go?",
+        "identity_default_org": "The bank",
+        "identity_tech": "{org}? Is there a problem with the shop's computer? The register has been slow.",
+        "name_known": " And your name was {name}? Which company?",
+        "name_unknown": " What did you say your name was? And the company?",
+        "ok": "Alright.",
+        "callback": "Before I do anything, can I call you back on an official number my accountant can verify?",
+    },
+}
+
+VOICES = {"dorothy": DOROTHY_VOICE, "robert": ROBERT_VOICE, "sandra": SANDRA_VOICE}
+
+
+def _voice(persona_id):
+    p = personas.get_persona(persona_id)
+    return p, VOICES[p["id"]]
+
+
+_DIGIT_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+           "November", "December"]
+
+
+def _ordinal(n):
+    return f"{n}{'th' if 10 <= n % 100 <= 20 else {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th')}"
+
+
+def _context(p):
+    """Placeholders available to persona response templates, built from the persona's decoy data."""
+    d = p["decoy"]
+    mm, dd, yyyy = d["dob"].split("/")
+    return {
+        "suffix": d["account_suffix"],
+        "suffix_spoken": "-".join(_DIGIT_WORDS[int(c)] for c in d["account_suffix"]).capitalize(),
+        "email_spoken": d["email"].replace("@", " at ").replace(".", " dot "),
+        "dob_spoken": f"{_MONTHS[int(mm) - 1]} {_ordinal(int(dd))}, {yyyy}",
+    }
+
+
+def _stalls(slots, v):
+    return v["METHOD_STALLS"] if slots.get("method") in ("gift cards", "bitcoin") else v["STALLS"]
 
 
 def _pick(options, used, rng):
@@ -291,32 +581,32 @@ def _pick(options, used, rng):
     return rng.choice(fresh or options)
 
 
-def _readback(prev, now):
-    """If the caller just gave a new detail, Dorothy repeats it back (keeps them engaged and confirms it)."""
+def _readback(prev, now, v):
+    """If the caller just gave a new detail, the persona repeats it back (keeps them engaged and confirms it)."""
+    L = v["LINES"]
     if now.get("routing") and now.get("routing") != prev.get("routing"):
-        return f"Routing number {_spell(now['routing'])}. Did I get that right?"
+        return L["rb_routing"].format(digits=_spell(now["routing"]))
     if now.get("account") and now.get("account") != prev.get("account"):
-        return f"Account {_spell(now['account'])}. Is that correct?"
+        return L["rb_account"].format(digits=_spell(now["account"]))
     if now.get("bank") and now.get("bank") != prev.get("bank"):
-        return f"{now['bank']}. I've never heard of them. Are they a proper bank?"
+        return L["rb_bank"].format(bank=now["bank"])
     if now.get("amount") and now.get("amount") != prev.get("amount"):
-        return f"{_money(now['amount'])}? Oh my, that's nearly everything."
+        return L["rb_amount"].format(amount=_money(now["amount"]))
     if now.get("wallet") and now.get("wallet") != prev.get("wallet"):
-        w = now["wallet"]
-        return f"Oh my, that's a long one. {' '.join(w[:6].upper())}... I'll never get that right. Could you read it again slowly?"
+        return L["rb_wallet"].format(chunk=" ".join(now["wallet"][:6].upper()))
     if now.get("phone") and now.get("phone") != prev.get("phone"):
-        return f"{now['phone']}. I'll put it by the phone."
+        return L["rb_phone"].format(phone=now["phone"])
     return None
 
 
-def _all_questions(slots):
+def _all_questions(slots, v):
     for slot in ("bank", "routing", "account", "amount", "phone"):
         if slot not in slots and not (slot in ("bank", "routing", "account") and slots.get("method") in ("gift cards", "bitcoin")):
-            return ASK_FOR[slot]
+            return v["ASK_FOR"][slot]
     return []
 
 
-def _next_question(slots, used, rng):
+def _next_question(slots, used, rng, v):
     if not slots.get("money_requested"):
         return None
     if slots.get("method") == "gift cards" and slots.get("card_count"):
@@ -325,12 +615,16 @@ def _next_question(slots, used, rng):
         if slot not in slots:
             if slot in ("bank", "routing", "account") and slots.get("method") in ("gift cards", "bitcoin"):
                 continue  # gift card / crypto scams don't need bank details
-            return _pick(ASK_FOR[slot], used, rng)
+            return _pick(v["ASK_FOR"][slot], used, rng)
     return None
 
 
-def reply(transcript, seed=None):
-    """Return Dorothy's next line. `transcript` is the list of {speaker, text}, ending with the caller's message."""
+def reply(transcript, seed=None, persona_id=None):
+    """Return the persona's next line. `transcript` is the list of {speaker, text}, ending with the caller's message.
+    persona_id picks the character voice (default: Dorothy); the logic is identical for all of them.
+    (The decoy's own turns are always stored with speaker 'Dorothy': it is the role marker, not the persona's name.)"""
+    persona, v = _voice(persona_id)
+    L, RESP, ctx = v["LINES"], v["RESPONSES"], _context(persona)
     rng = random.Random(seed if seed is not None else len(transcript))
     used = {m.get("text", "") for m in transcript if m.get("speaker") == "Dorothy"}
     dorothy_turns = len(used)
@@ -341,53 +635,53 @@ def reply(transcript, seed=None):
     intent = intent_of(_spoken_digits_to_numbers(last))
 
     # A brand new detail always gets read back first.
-    readback = _readback(before, now)
-    question = _next_question(now, used, rng)
+    readback = _readback(before, now, v)
+    question = _next_question(now, used, rng, v)
 
     # Gift cards / crypto: ask for the specifics scammers will happily give.
     if intent == "card_numbers":
-        return _trim(_pick(RESPONSES["card_numbers"], used, rng))
+        return _trim(_pick(RESP["card_numbers"], used, rng))
     if now.get("method") == "gift cards" and "gift card" in last.lower():
         if now.get("card_count") and now.get("card_value") and not (before.get("card_count") and before.get("card_value")):
             brand = (now.get("card_brand", "") + " ").lstrip()
-            return _trim(f"{now['card_count']} {brand}gift cards, {_money(now['card_value'])} each. I'll have to drive to the store. Where do I send the numbers once I have them?")
+            return _trim(L["gift_done"].format(count=now["card_count"], brand=brand, value=_money(now["card_value"])))
         if not now.get("card_count"):
-            return "Gift cards? From the drugstore? Which kind, how many, and how much on each one?"
+            return L["gift_ask"]
     if now.get("method") == "bitcoin" and re.search(r"bitcoin|crypto|wallet", last.lower()) and "bitcoin" not in " ".join(used).lower():
-        return "Bitcoin? I don't know how to do that. Is there a machine somewhere? And where does the money go, is there an address?"
+        return L["bitcoin"]
 
     if intent == "identity" and not now.get("money_requested"):
-        org = now.get("org", "The bank")
+        org = now.get("org", L["identity_default_org"])
         org = org[0].upper() + org[1:]
-        name = f" And your name was {now['caller_name']}?" if now.get("caller_name") else " What did you say your name was?"
-        options = [r.format(org=org) for r in RESPONSES["identity"]]
+        name = L["name_known"].format(name=now["caller_name"]) if now.get("caller_name") else L["name_unknown"]
+        options = [r.format(org=org) for r in RESP["identity"]]
         if now.get("org") == "tech support":
-            options = [f"{org}? Is something wrong with my computer? It has been very slow lately."]
+            options = [L["identity_tech"].format(org=org)]
         return _trim(_pick(options, used, rng) + name)
 
     # Ask once for a callback after they've given some details (scammers refuse; that's a red flag we capture).
     asked_callback = any("call you back" in u.lower() for u in used)
     if not asked_callback and len([k for k in ("bank", "routing", "account") if k in now]) >= 2 and intent not in ("threat", "asks_code"):
-        base = readback or "Alright."
-        return _trim(f"{base} Before I do anything, can I call you back on the number on my statement?")
+        base = readback or L["ok"]
+        return _trim(f"{base} {L['callback']}")
 
     if readback:
-        follow = question or _pick(_stalls(now), used, rng)
+        follow = question or _pick(_stalls(now, v), used, rng)
         return _trim(f"{readback} {follow}")
 
     if intent in ("money_move", "urgency", "compromised") and question and now.get("money_requested"):
-        combos = [f"{lead} {q}" for lead in LEADS[intent] for q in _all_questions(now)]
+        combos = [f"{lead} {q}" for lead in v["LEADS"][intent] for q in _all_questions(now, v)]
         return _trim(_pick(combos, used, rng))
 
-    if intent in RESPONSES and intent not in ("other",):
-        line = _pick(RESPONSES[intent], used, rng)
+    if intent in RESP and intent not in ("other",):
+        line = _pick([o.format(**ctx) for o in RESP[intent]], used, rng)
         if intent == "greeting" and dorothy_turns > 2:
-            line = question or _pick(_stalls(now), used, rng)
+            line = question or _pick(_stalls(now, v), used, rng)
         return _trim(line)
 
     if question:
         return _trim(question)
-    pool = (_stalls(now) + RESPONSES["other"]) if now.get("money_requested") else RESPONSES["other"]
+    pool = (_stalls(now, v) + RESP["other"]) if now.get("money_requested") else RESP["other"]
     return _trim(_pick(pool, used, rng))
 
 
@@ -396,4 +690,4 @@ def _trim(text):
     return " ".join(words[:MAX_WORDS]) if len(words) > MAX_WORDS else text
 
 
-OPENING_LINE = "Hello? This is Dorothy speaking. Who's calling, please?"
+OPENING_LINE = personas.get_persona("dorothy")["opening_line"]  # Dorothy's; see personas.py for the others
